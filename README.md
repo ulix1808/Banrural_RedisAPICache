@@ -10,6 +10,51 @@ GET /instituciones → Redis HIT  → respuesta inmediata
                    → Redis MISS → API HTTP → guarda en Redis (TTL) → respuesta
 ```
 
+## Cómo funciona (Cache-Aside)
+
+La lógica central está en `InstitucionesFinancierasService.obtenerInstituciones()`.  
+Cada vez que llega una petición, el servicio sigue estos 3 pasos:
+
+```
+1. Buscar en Redis
+        │
+        ├── HIT (dato existe) → devolver JSON cacheado (fromCache: true)
+        │
+        └── MISS (no existe) ↓
+
+2. Llamar al API de instituciones financieras (HTTP GET)
+
+3. Guardar la respuesta en Redis con TTL → devolver JSON (fromCache: false)
+```
+
+Código equivalente:
+
+```java
+public CachedApiResult obtenerInstituciones() {
+    // Paso 1: Intentar leer de Redis
+    String cached = cacheService.get(CACHE_KEY);
+    if (cached != null) {
+        return CachedApiResult.fromCache(cached, CACHE_KEY, ttl);
+    }
+
+    // Paso 2: Cache miss → llamar al API downstream
+    String apiResponse = apiClient.consultarInstituciones();
+
+    // Paso 3: Guardar en Redis con TTL
+    cacheService.put(CACHE_KEY, apiResponse, ttl);
+
+    return CachedApiResult.fromApi(apiResponse, CACHE_KEY);
+}
+```
+
+| Paso | Qué pasa | `fromCache` | Se llama al API |
+|------|----------|-------------|-----------------|
+| 1ª petición | MISS → API → guarda en Redis | `false` | Sí |
+| 2ª petición (antes del TTL) | HIT → lee de Redis | `true` | No |
+| Tras `DELETE /cache/...` | MISS otra vez | `false` | Sí |
+
+Las operaciones directas contra Redis (`get`, `setex`, `del`, `ttl`) están en `RedisCacheService`, que usa Jedis `RedisClient`.
+
 ## Estructura
 
 ```
