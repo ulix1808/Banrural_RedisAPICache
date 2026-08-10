@@ -55,6 +55,104 @@ public CachedApiResult obtenerInstituciones() {
 
 Las operaciones directas contra Redis (`get`, `setex`, `del`, `ttl`) están en `RedisCacheService`, que usa Jedis `RedisClient`.
 
+## Diseño de la KEY (llave de cache)
+
+### ¿Qué se usa como llave?
+
+La llave completa en Redis se arma en dos partes:
+
+```
+[prefijo configurado] + [identificador lógico del dato]
+```
+
+En este ejemplo:
+
+| Parte | Valor | Origen |
+|-------|-------|--------|
+| Prefijo | `banrural:transferencias:` | `application.yml` → `banrural.cache.key-prefix` |
+| Identificador | `catalogo:instituciones-financieras` | Constante `CACHE_KEY` en el servicio |
+
+**Llave final en Redis:**
+
+```
+banrural:transferencias:catalogo:instituciones-financieras
+```
+
+El prefijo evita colisiones con otras apps o módulos que usen el mismo Redis.  
+El identificador describe **qué dato** es (catálogo, usuario, recurso).
+
+### ¿Por qué esta llave es fija?
+
+El API de instituciones financieras es un **catálogo global**:
+
+- No recibe `usuario`, `oficina` ni `canal`
+- Siempre devuelve la misma lista para todos
+- La respuesta **no cambia** según quién consulta
+
+Por eso una sola llave alcanza: todos los usuarios comparten el mismo JSON en Redis.  
+Eso maximiza el beneficio del cache (un MISS sirve a miles de peticiones posteriores).
+
+### ¿Qué pasa si el API tiene parámetros?
+
+Si la respuesta **depende de los parámetros**, la llave **debe incluir esos parámetros**.  
+Cada combinación distinta de parámetros = una entrada distinta en Redis.
+
+```
+Sin parámetros (catálogo global)     → 1 llave para todos
+Con parámetros (dato por usuario)    → 1 llave por cada combinación de params
+```
+
+**Regla:** la llave identifica **exactamente** la respuesta que guardaste.  
+Si dos peticiones pueden devolver JSON distinto, **no pueden usar la misma llave**.
+
+#### Ejemplo: APIs del `/1068` con parámetros
+
+En la pantalla de transferencias, otros servicios reciben `usuario` y la respuesta varía:
+
+| API | Parámetros | Llave propuesta |
+|-----|------------|-----------------|
+| Instituciones financieras | ninguno (catálogo) | `catalogo:instituciones-financieras` |
+| Top cuentas destino | `usuario` | `usuario:USR001:top-cuentas` |
+| Cuentas propias | `usuario` | `usuario:USR001:cuentas-propias` |
+| Cuentas terceros | `usuario` | `usuario:USR001:cuentas-terceros` |
+
+Llaves completas en Redis:
+
+```
+banrural:transferencias:catalogo:instituciones-financieras      ← todos comparten
+banrural:transferencias:usuario:USR001:top-cuentas               ← solo USR001
+banrural:transferencias:usuario:USR002:top-cuentas               ← solo USR002
+```
+
+#### Código equivalente para un API con parámetros
+
+```java
+public CachedApiResult obtenerTopCuentas(String usuario) {
+    String cacheKey = "usuario:" + usuario + ":top-cuentas";
+
+    String cached = cacheService.get(cacheKey);
+    if (cached != null) {
+        return CachedApiResult.fromCache(cached, cacheKey, cacheService.getTtlRemaining(cacheKey));
+    }
+
+    String apiResponse = apiClient.consultarTopCuentas(usuario);
+    cacheService.put(cacheKey, apiResponse, userDataTtlSeconds);
+
+    return CachedApiResult.fromApi(apiResponse, cacheKey);
+}
+```
+
+#### ¿Qué pasa si usas la misma llave con params distintos?
+
+**Error de diseño:** si cacheas con llave fija pero el API recibe parámetros:
+
+```
+Petición usuario=USR001 → guardas en "top-cuentas"
+Petición usuario=USR002 → HIT en "top-cuentas" → devuelve datos de USR001 ❌
+```
+
+Siempre incluir en la llave todo lo que hace variar la respuesta (`usuario`, `oficina`, `canal`, filtros, etc.).
+
 ## Estructura
 
 ```
@@ -144,4 +242,5 @@ mvn test
 
 ## Contexto /1068
 
-Este ejemplo cubre solo el **catálogo global** (API 1 de 5). Los otros catálogos del `/1068` se pueden extender con el mismo patrón y keys por usuario.
+Este ejemplo cubre el **catálogo global** (API 1 de 5) con llave fija.  
+Los otros 4 APIs del `/1068` varían por `usuario` — ver sección [Diseño de la KEY](#diseño-de-la-key-llave-de-cache).
