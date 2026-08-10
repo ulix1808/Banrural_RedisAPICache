@@ -1,0 +1,18 @@
+server:
+  port: 8080
+
+redis:
+  host: ${REDIS_HOST:10.160.208.165}
+  port: ${REDIS_PORT:6379}
+  password: ${REDIS_PASSWORD:}
+
+banrural:
+  api:
+    instituciones-url: ${INSTITUCIONES_URL:http://10.160.209.84:7080/api-ach-instituciones-financieras/v1/consulta-instituciones}
+  cache:
+    catalog-ttl-seconds: ${CACHE_CATALOG_TTL:3600}
+    key-prefix: "banrural:transferencias:"
+
+logging:
+  level:
+    com.banrural.cache: INFO
